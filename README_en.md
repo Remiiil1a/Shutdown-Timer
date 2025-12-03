@@ -96,4 +96,4 @@ A: You can exit via the tray menu, or select "Yes(Y)" when closing the window.
 
 ---
 
-[Back to Main Page](README.md) | [View Chinese Version](README_zh.md)
+[Back to Main Page]() | [View Chinese Version](README_zh.md)
