@@ -6,10 +6,15 @@
 #define _UNICODE
 #endif
 
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0601 // Windows 7及以上版本
+#endif
+
 #include <windows.h>
-#include <commctrl.h> // 需要这个头文件
+#include <commctrl.h>
 #include <string>
 #include <cstdio>
+#include <VersionHelpers.h>
 #define IDI_MAIN_ICON 101
 
 #pragma comment(lib, "comctl32.lib")
@@ -29,16 +34,17 @@ processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
 // 全局变量
 HWND g_hTimeEdit, g_hStartBtn, g_hCancelBtn, g_hStatusLabel, g_hTitleLabel;
+HWND g_hShutdownRadio, g_hRestartRadio, g_hLogoffRadio; // 添加单选按钮句柄
 HFONT g_hTitleFont, g_hNormalFont;
 int g_remainingSeconds = 0;
 bool g_isShutdownScheduled = false;
 int g_dpi = 96;
 HBRUSH g_hBgBrush = NULL;
-bool g_forceShutdown = true; // 默认强制关机
+bool g_forceShutdown = true; // 仅保留强制关机
 int g_shutdownType = 0;      // 0:关机, 1:重启, 2:注销
-HWND g_hForceRadio, g_hNormalRadio;
-NOTIFYICONDATA g_nid = {0};
 HINSTANCE g_hInstance;
+bool g_threeMinuteNotified = false; // 3分钟提醒标记
+NOTIFYICONDATA g_nid = {0};
 
 // 函数声明
 LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
@@ -51,6 +57,9 @@ void CreateTrayIcon(HWND hwnd);
 void RemoveTrayIcon();
 void ShowTrayContextMenu(HWND hwnd, POINT pt);
 bool IsInstanceRunning();
+void CheckAndWarnAdminPrivilege();
+bool IsSystemLocked();
+void ShowThreeMinuteWarning(HWND hwnd);
 
 // 创建字体
 HFONT CreateCustomFont(int size, const wchar_t *fontName, int weight = FW_NORMAL)
@@ -98,7 +107,7 @@ void CreateTrayIcon(HWND hwnd)
     g_nid.cbSize = sizeof(NOTIFYICONDATA);
     g_nid.hWnd = hwnd;
     g_nid.uID = 1;
-    g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+    g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP | NIF_SHOWTIP;
     g_nid.uCallbackMessage = WM_TRAYICON;
 
     // 使用 LoadIconW 加载图标
@@ -110,15 +119,15 @@ void CreateTrayIcon(HWND hwnd)
     }
 
     // 使用 wcscpy_s 拷贝宽字符串
-    wcscpy_s(g_nid.szTip, 128, L"定时关机程序");
+    wcscpy_s(g_nid.szTip, L"定时关机程序");
 
     Shell_NotifyIconW(NIM_ADD, &g_nid);
 }
 
-// 移除托盘图标
+// 移除托盘图标函数
 void RemoveTrayIcon()
 {
-    Shell_NotifyIcon(NIM_DELETE, &g_nid);
+    Shell_NotifyIconW(NIM_DELETE, &g_nid);
 }
 
 // 显示托盘右键菜单
@@ -164,12 +173,138 @@ bool EnableShutdownPrivilege()
     return (result && lastError == ERROR_SUCCESS);
 }
 
+// 检查是否以管理员身份运行并给出警告
+void CheckAndWarnAdminPrivilege()
+{
+    BOOL isElevated = FALSE;
+    HANDLE hToken = NULL;
+
+    if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &hToken))
+    {
+        TOKEN_ELEVATION elevation;
+        DWORD dwSize = sizeof(TOKEN_ELEVATION);
+
+        if (GetTokenInformation(hToken, TokenElevation, &elevation, sizeof(elevation), &dwSize))
+        {
+            isElevated = elevation.TokenIsElevated;
+        }
+        CloseHandle(hToken);
+    }
+
+    if (!isElevated)
+    {
+        MessageBoxW(NULL,
+                    L"⚠️ 程序未以管理员身份运行，部分功能可能受限。\n"
+                    L"建议以管理员身份重新启动程序以获得完整功能。",
+                    L"权限提示", MB_ICONWARNING | MB_OK);
+    }
+}
+
+// 检查系统是否处于锁定状态
+bool IsSystemLocked()
+{
+    // 尝试获取工作站锁定状态
+    HWINSTA hCurrent = GetProcessWindowStation();
+    if (hCurrent)
+    {
+        // 使用替代方法检查工作站锁定状态，兼容更多Windows版本
+        DWORD dwFlags;
+        if (GetUserObjectInformationW(hCurrent, UOI_FLAGS, &dwFlags, sizeof(dwFlags), NULL))
+        {
+            // WSF_VISIBLE 标志表示工作站可见，未锁定
+            return !(dwFlags & WSF_VISIBLE);
+        }
+    }
+    return false;
+}
+
+// 显示3分钟警告
+// 在文件顶部添加调试宏
+#ifdef _DEBUG
+#define DEBUG_PRINT(msg) OutputDebugStringW(msg)
+#else
+#define DEBUG_PRINT(msg)
+#endif
+
+// 修改ShowThreeMinuteWarning函数
+void ShowThreeMinuteWarning(HWND hwnd)
+{
+    DEBUG_PRINT(L"[ShutdownTimer] ShowThreeMinuteWarning called\n");
+
+    // 如果系统已锁定，不显示提醒
+    if (IsSystemLocked())
+    {
+        DEBUG_PRINT(L"[ShutdownTimer] System is locked, skipping notification\n");
+        return;
+    }
+
+    const wchar_t *actionText = L"关机";
+    switch (g_shutdownType)
+    {
+    case 1:
+        actionText = L"重启";
+        break;
+    case 2:
+        actionText = L"注销";
+        break;
+    }
+
+    wchar_t message[256];
+    swprintf_s(message, L"⚠️ 距离%s还有3分钟！请做好准备。", actionText);
+
+    DEBUG_PRINT(L"[ShutdownTimer] Message prepared: ");
+    DEBUG_PRINT(message);
+    DEBUG_PRINT(L"\n");
+
+    // 记录Windows版本
+    OSVERSIONINFOEXW osvi = {sizeof(osvi), 0, 0, 0, 0, {0}, 0, 0};
+    GetVersionExW((OSVERSIONINFOW *)&osvi);
+
+    wchar_t versionInfo[128];
+    swprintf_s(versionInfo, L"[ShutdownTimer] Windows version: %d.%d Build %d\n",
+               osvi.dwMajorVersion, osvi.dwMinorVersion, osvi.dwBuildNumber);
+    DEBUG_PRINT(versionInfo);
+
+    // 尝试不同的通知方法
+    BOOL notificationSent = FALSE;
+
+    // 方法1：使用Shell_NotifyIconW
+    NOTIFYICONDATA nid = {0};
+    nid.cbSize = sizeof(NOTIFYICONDATA);
+    nid.hWnd = hwnd;
+    nid.uID = 1;
+    nid.uFlags = NIF_INFO | NIF_SHOWTIP;
+    nid.dwInfoFlags = NIIF_WARNING | NIIF_LARGE_ICON;
+    nid.uTimeout = 15000;
+    nid.uVersion = NOTIFYICON_VERSION_4;
+
+    wcscpy_s(nid.szInfoTitle, L"定时关机程序");
+    wcscpy_s(nid.szInfo, message);
+
+    notificationSent = Shell_NotifyIconW(NIM_MODIFY, &nid);
+
+    wchar_t debugMsg[128];
+    swprintf_s(debugMsg, L"[ShutdownTimer] Shell_NotifyIcon returned: %d\n", notificationSent);
+    DEBUG_PRINT(debugMsg);
+
+    if (!notificationSent)
+    {
+        // 如果通知失败，使用消息框
+        DEBUG_PRINT(L"[ShutdownTimer] Notification failed, using MessageBox\n");
+        MessageBoxW(hwnd, message, L"定时关机程序 - 提醒", MB_ICONWARNING | MB_OK);
+    }
+    else
+    {
+        DEBUG_PRINT(L"[ShutdownTimer] Notification sent successfully\n");
+    }
+}
+
 // 开始关机定时
 void OnStartShutdown(HWND hwnd)
 {
     if (g_isShutdownScheduled)
     {
-        MessageBoxW(hwnd, L"⚠️ 已有定时关机任务在运行！", L"提示", MB_ICONWARNING);
+        MessageBoxW(hwnd, L"⚠️ 已有定时任务在运行！", L"提示", MB_ICONWARNING);
         return;
     }
 
@@ -177,24 +312,28 @@ void OnStartShutdown(HWND hwnd)
     GetWindowTextW(g_hTimeEdit, buffer, 32);
     int minutes = _wtoi(buffer);
 
-    if (minutes <= 0 || minutes > 1440)
+    if (minutes < 0 || minutes > 1440)
     {
-        MessageBoxW(hwnd, L"⚠️ 请输入1-1440之间的有效分钟数！\n（最多24小时）", L"错误", MB_ICONERROR);
+        MessageBoxW(hwnd, L"⚠️ 请输入0-1440之间的有效分钟数！\n（最多24小时）", L"错误", MB_ICONERROR);
         return;
     }
 
-    if (!EnableShutdownPrivilege())
-    {
-        MessageBoxW(hwnd, L"⚠️ 无法获取关机权限！\n请以管理员身份运行程序。", L"错误", MB_ICONERROR);
-        return;
-    }
+    // 重置3分钟提醒标记
+    g_threeMinuteNotified = false;
 
     g_remainingSeconds = minutes * 60;
     g_isShutdownScheduled = true;
     SetTimer(hwnd, 1, 1000, NULL);
 
+    // 禁用所有相关控件
     EnableWindow(g_hStartBtn, FALSE);
     EnableWindow(g_hCancelBtn, TRUE);
+    EnableWindow(g_hTimeEdit, FALSE); // 禁用时间输入框
+
+    // 禁用操作类型选择
+    EnableWindow(g_hShutdownRadio, FALSE);
+    EnableWindow(g_hRestartRadio, FALSE);
+    EnableWindow(g_hLogoffRadio, FALSE);
 
     const wchar_t *actionText = L"关机";
     switch (g_shutdownType)
@@ -222,9 +361,17 @@ void OnCancelShutdown()
     HWND hwnd = GetParent(g_hStartBtn);
     KillTimer(hwnd, 1);
     g_isShutdownScheduled = false;
+    g_threeMinuteNotified = false; // 重置提醒标记
 
+    // 重新启用所有相关控件
     EnableWindow(g_hStartBtn, TRUE);
     EnableWindow(g_hCancelBtn, FALSE);
+    EnableWindow(g_hTimeEdit, TRUE); // 启用时间输入框
+
+    // 启用操作类型选择
+    EnableWindow(g_hShutdownRadio, TRUE);
+    EnableWindow(g_hRestartRadio, TRUE);
+    EnableWindow(g_hLogoffRadio, TRUE);
 
     const wchar_t *actionText = L"关机";
     switch (g_shutdownType)
@@ -244,8 +391,8 @@ void OnCancelShutdown()
     HWND hDisplay = GetDlgItem(hwnd, 8);
     SetWindowTextW(hDisplay, L"⏱ 定时已取消");
 
-    wcscpy_s(g_nid.szTip, L"定时关机程序 - 已取消定时");
-    Shell_NotifyIcon(NIM_MODIFY, &g_nid);
+    wcscpy_s(g_nid.szTip, _countof(g_nid.szTip), L"定时关机程序 - 已取消定时");
+    Shell_NotifyIconW(NIM_MODIFY, &g_nid);
 }
 
 // 更新状态显示
@@ -285,6 +432,7 @@ void UpdateTimerDisplay()
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
                    LPSTR lpCmdLine, int nCmdShow)
 {
+    // 检查是否已有实例运行
     if (IsInstanceRunning())
     {
         ShowError(L"程序已在运行中！如果找不到，请检查系统托盘");
@@ -294,7 +442,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     g_hInstance = hInstance;
     SetProcessDPIAware();
 
-    // 初始化通用控件 - 这是必要的
+    // 检查管理员权限并给出警告（不强制）
+    CheckAndWarnAdminPrivilege();
+
+    // 初始化通用控件
     INITCOMMONCONTROLSEX icex;
     icex.dwSize = sizeof(icex);
     icex.dwICC = ICC_WIN95_CLASSES;
@@ -328,7 +479,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     ReleaseDC(NULL, hdc);
 
     int windowWidth = ScaleValue(450, g_dpi);
-    int windowHeight = ScaleValue(520, g_dpi);
+    int windowHeight = ScaleValue(460, g_dpi);
     int screenWidth = GetSystemMetrics(SM_CXSCREEN);
     int screenHeight = GetSystemMetrics(SM_CYSCREEN);
 
@@ -365,6 +516,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 // 窗口过程
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
+
     switch (msg)
     {
     case WM_CREATE:
@@ -401,7 +553,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                                     hwnd, (HMENU)1, g_hInstance, NULL);
 
         // 取消按钮
-        g_hCancelBtn = CreateWindowW(L"BUTTON", L"⏹ 取消关机",
+        g_hCancelBtn = CreateWindowW(L"BUTTON", L"⏹ 取消操作",
                                      WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                                      ScaleValue(230, g_dpi), ScaleValue(120, g_dpi),
                                      ScaleValue(120, g_dpi), ScaleValue(38, g_dpi),
@@ -416,67 +568,54 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                       hwnd, NULL, g_hInstance, NULL);
 
         // 关机选项
-        HWND hShutdownRadio = CreateWindowW(L"BUTTON", L"关机",
-                                            WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON | WS_GROUP,
-                                            ScaleValue(50, g_dpi), ScaleValue(190, g_dpi),
-                                            ScaleValue(100, g_dpi), ScaleValue(25, g_dpi),
-                                            hwnd, (HMENU)5, g_hInstance, NULL);
+        g_hShutdownRadio = CreateWindowW(L"BUTTON", L"关机",
+                                         WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON | WS_GROUP,
+                                         ScaleValue(50, g_dpi), ScaleValue(190, g_dpi),
+                                         ScaleValue(100, g_dpi), ScaleValue(25, g_dpi),
+                                         hwnd, (HMENU)5, g_hInstance, NULL);
 
         // 重启选项
-        HWND hRestartRadio = CreateWindowW(L"BUTTON", L"重启",
-                                           WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
-                                           ScaleValue(160, g_dpi), ScaleValue(190, g_dpi),
-                                           ScaleValue(100, g_dpi), ScaleValue(25, g_dpi),
-                                           hwnd, (HMENU)6, g_hInstance, NULL);
+        g_hRestartRadio = CreateWindowW(L"BUTTON", L"重启",
+                                        WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
+                                        ScaleValue(160, g_dpi), ScaleValue(190, g_dpi),
+                                        ScaleValue(100, g_dpi), ScaleValue(25, g_dpi),
+                                        hwnd, (HMENU)6, g_hInstance, NULL);
 
         // 注销选项
-        HWND hLogoffRadio = CreateWindowW(L"BUTTON", L"注销",
-                                          WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
-                                          ScaleValue(270, g_dpi), ScaleValue(190, g_dpi),
-                                          ScaleValue(100, g_dpi), ScaleValue(25, g_dpi),
-                                          hwnd, (HMENU)7, g_hInstance, NULL);
+        g_hLogoffRadio = CreateWindowW(L"BUTTON", L"注销",
+                                       WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
+                                       ScaleValue(270, g_dpi), ScaleValue(190, g_dpi),
+                                       ScaleValue(100, g_dpi), ScaleValue(25, g_dpi),
+                                       hwnd, (HMENU)7, g_hInstance, NULL);
 
         // 默认选中关机
-        SendMessage(hShutdownRadio, BM_SETCHECK, BST_CHECKED, 0);
+        SendMessage(g_hShutdownRadio, BM_SETCHECK, BST_CHECKED, 0);
 
-        // 操作方式
-        CreateWindowW(L"BUTTON", L"操作方式（仅对关机/重启有效）",
-                      WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+        // 强制操作提示
+        CreateWindowW(L"STATIC", L"⚠️ 操作将强制进行，不等待应用程序关闭",
+                      WS_CHILD | WS_VISIBLE | SS_LEFT,
                       ScaleValue(30, g_dpi), ScaleValue(260, g_dpi),
-                      ScaleValue(390, g_dpi), ScaleValue(80, g_dpi),
+                      ScaleValue(390, g_dpi), ScaleValue(40, g_dpi),
                       hwnd, NULL, g_hInstance, NULL);
-
-        g_hForceRadio = CreateWindowW(L"BUTTON", L"强制(不保存应用程序数据)",
-                                      WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON | WS_GROUP,
-                                      ScaleValue(50, g_dpi), ScaleValue(280, g_dpi),
-                                      ScaleValue(180, g_dpi), ScaleValue(25, g_dpi),
-                                      hwnd, (HMENU)3, g_hInstance, NULL);
-
-        g_hNormalRadio = CreateWindowW(L"BUTTON", L"正常(等待应用程序关闭)",
-                                       WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
-                                       ScaleValue(50, g_dpi), ScaleValue(305, g_dpi),
-                                       ScaleValue(180, g_dpi), ScaleValue(25, g_dpi),
-                                       hwnd, (HMENU)4, g_hInstance, NULL);
-        SendMessage(g_hForceRadio, BM_SETCHECK, BST_CHECKED, 0);
 
         // 状态标签
         g_hStatusLabel = CreateWindowW(L"STATIC", L"📋 状态：等待设置定时时间",
                                        WS_CHILD | WS_VISIBLE | SS_LEFT,
-                                       ScaleValue(20, g_dpi), ScaleValue(350, g_dpi),
+                                       ScaleValue(20, g_dpi), ScaleValue(310, g_dpi),
                                        ScaleValue(410, g_dpi), ScaleValue(40, g_dpi),
                                        hwnd, NULL, g_hInstance, NULL);
 
         // 时间显示标签
         CreateWindowW(L"STATIC", L"⏱ 剩余时间将在此显示",
                       WS_CHILD | WS_VISIBLE | SS_CENTER,
-                      ScaleValue(20, g_dpi), ScaleValue(390, g_dpi),
-                      ScaleValue(410, g_dpi), ScaleValue(80, g_dpi),
+                      ScaleValue(20, g_dpi), ScaleValue(350, g_dpi),
+                      ScaleValue(410, g_dpi), ScaleValue(60, g_dpi),
                       hwnd, (HMENU)8, g_hInstance, NULL);
 
         // 底部信息
-        CreateWindowW(L"STATIC", L"⚠️ 定时结束后将直接关机/重启/注销，请注意保存工作",
+        CreateWindowW(L"STATIC", L"⚠️ 定时结束后将直接执行操作，请注意保存工作",
                       WS_CHILD | WS_VISIBLE | SS_CENTER,
-                      ScaleValue(20, g_dpi), ScaleValue(470, g_dpi),
+                      ScaleValue(20, g_dpi), ScaleValue(410, g_dpi),
                       ScaleValue(410, g_dpi), ScaleValue(20, g_dpi),
                       hwnd, NULL, g_hInstance, NULL);
 
@@ -494,10 +633,20 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
     case WM_CTLCOLORSTATIC:
     {
-        HDC hdcStatic = (HDC)wParam;
-        HWND hwndStatic = (HWND)lParam;
-        SetTextColor(hdcStatic, COLOR_TEXT);
-        SetBkColor(hdcStatic, COLOR_BG);
+        HDC hdcBtn = (HDC)wParam;
+        HWND hwndBtn = (HWND)lParam;
+
+        // 检查控件是否被禁用
+        if (!IsWindowEnabled(hwndBtn))
+        {
+            SetTextColor(hdcBtn, RGB(150, 150, 150)); // 灰色文本
+        }
+        else
+        {
+            SetTextColor(hdcBtn, COLOR_TEXT);
+        }
+
+        SetBkColor(hdcBtn, COLOR_BG);
         return (LRESULT)g_hBgBrush;
     }
 
@@ -516,16 +665,21 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             OnStartShutdown(hwnd);
         else if (wmId == 2)
             OnCancelShutdown();
-        else if (wmId == 3)
-            g_forceShutdown = true;
-        else if (wmId == 4)
-            g_forceShutdown = false;
         else if (wmId == 5)
-            g_shutdownType = 0; // 关机
+        {
+            if (!g_isShutdownScheduled) // 只有在未倒计时时才允许切换
+                g_shutdownType = 0;     // 关机
+        }
         else if (wmId == 6)
-            g_shutdownType = 1; // 重启
+        {
+            if (!g_isShutdownScheduled) // 只有在未倒计时时才允许切换
+                g_shutdownType = 1;     // 重启
+        }
         else if (wmId == 7)
-            g_shutdownType = 2; // 注销
+        {
+            if (!g_isShutdownScheduled) // 只有在未倒计时时才允许切换
+                g_shutdownType = 2;     // 注销
+        }
         else if (wmId == ID_TRAY_SHOW)
             ShowWindow(hwnd, SW_RESTORE);
         else if (wmId == ID_TRAY_CANCEL)
@@ -550,6 +704,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         {
             g_remainingSeconds--;
             UpdateTimerDisplay();
+
+            // 检查是否需要显示3分钟提醒
+            if (g_remainingSeconds == 180 && !g_threeMinuteNotified)
+            {
+                ShowThreeMinuteWarning(hwnd);
+                g_threeMinuteNotified = true;
+            }
 
             wchar_t tip[128];
             const wchar_t *actionText = L"关机";
@@ -580,38 +741,53 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 KillTimer(hwnd, 1);
                 if (EnableShutdownPrivilege())
                 {
+                    DWORD shutdownFlags = 0;
                     const wchar_t *actionText = L"关机";
-                    DWORD shutdownFlags = EWX_SHUTDOWN;
 
                     switch (g_shutdownType)
                     {
+                    case 0: // 关机
+                        actionText = L"关机";
+                        shutdownFlags = EWX_SHUTDOWN | EWX_FORCE | EWX_FORCEIFHUNG;
+                        break;
+
                     case 1: // 重启
                         actionText = L"重启";
-                        shutdownFlags = EWX_REBOOT;
+                        shutdownFlags = EWX_REBOOT | EWX_FORCE | EWX_FORCEIFHUNG;
                         break;
+
                     case 2: // 注销
                         actionText = L"注销";
-                        shutdownFlags = EWX_LOGOFF;
-                        break;
-                    default: // 关机
-                        actionText = L"关机";
-                        shutdownFlags = EWX_SHUTDOWN;
+                        shutdownFlags = EWX_LOGOFF | EWX_FORCE;
                         break;
                     }
-
-                    // 只有当选择关机或重启时，才考虑强制选项
-                    if (g_forceShutdown && (g_shutdownType == 0 || g_shutdownType == 1))
-                        shutdownFlags |= EWX_FORCE;
 
                     wchar_t msg[128];
                     swprintf_s(msg, L"状态：正在%s...", actionText);
                     SetWindowTextW(g_hStatusLabel, msg);
 
-                    ExitWindowsEx(shutdownFlags, SHTDN_REASON_FLAG_PLANNED);
+                    // 给程序一点时间更新界面
+                    UpdateWindow(hwnd);
+                    Sleep(500);
+
+                    if (g_shutdownType == 0 || g_shutdownType == 1) // 关机或重启
+                    {
+                        InitiateSystemShutdownEx(
+                            NULL,                  // 所有计算机
+                            NULL,                  // 不显示消息
+                            0,                     // 等待时间(秒)
+                            TRUE,                  // 强制关闭应用程序
+                            (g_shutdownType == 1), // 是否重启
+                            SHTDN_REASON_MAJOR_OTHER | SHTDN_REASON_MINOR_OTHER | SHTDN_REASON_FLAG_PLANNED);
+                    }
+                    else // 注销
+                    {
+                        ExitWindowsEx(shutdownFlags, SHTDN_REASON_MAJOR_OTHER | SHTDN_REASON_MINOR_OTHER | SHTDN_REASON_FLAG_PLANNED);
+                    }
                 }
                 else
                 {
-                    MessageBoxW(hwnd, L"⚠️ 关机权限获取失败！\n请以管理员身份运行程序。", L"错误", MB_ICONERROR);
+                    MessageBoxW(hwnd, L"⚠️ 操作权限获取失败！\n请以管理员身份运行程序。", L"错误", MB_ICONERROR);
                     OnCancelShutdown();
                 }
             }
