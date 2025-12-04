@@ -17,8 +17,9 @@ This is a user-friendly Windows shutdown timer application that supports system 
 - ✅ 定时关机、重启、注销 / Scheduled shutdown, restart, logoff
 - ✅ 系统托盘显示和操作 / System tray display and operations
 - ✅ 实时倒计时显示 / Real-time countdown display
-- ✅ 支持强制和正常关机模式 / Support forced and normal shutdown modes
+- ✅ 智能3分钟提醒 / Smart 3-minute warning notification
 - ✅ DPI自适应界面 / DPI-aware interface
+- ✅ 锁屏状态下静默运行 / Silent operation when system is locked
 
 ### 快速开始 / Quick Start
 选择上方语言查看完整文档。
