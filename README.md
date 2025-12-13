@@ -9,12 +9,13 @@
 
 ## 项目简介 / Project Overview
 
-这是一个美观易用的Windows定时关机、重启、注销程序，支持系统托盘和实时倒计时显示。
+这是一个功能强大的Windows定时关机、重启、注销程序，新增窗口监视功能，支持系统托盘和实时倒计时显示。
 
-This is a user-friendly Windows shutdown timer application that supports system shutdown, restart, logoff, system tray and real-time countdown display.
+This is a powerful Windows shutdown timer application with new window monitoring feature, supporting system shutdown, restart, logoff, system tray and real-time countdown display.
 
 ### 主要功能 / Key Features
 - ✅ 定时关机、重启、注销 / Scheduled shutdown, restart, logoff
+- ✅ **新增窗口监视功能** / **New window monitoring feature**
 - ✅ 系统托盘显示和操作 / System tray display and operations
 - ✅ 实时倒计时显示 / Real-time countdown display
 - ✅ 智能3分钟提醒 / Smart 3-minute warning notification
